@@ -1,0 +1,343 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+  <meta charset="UTF-8">
+  <title>Simulation de Gravitation Interactive</title>
+  <style>
+    /* Styles de base pour centrer la simulation et rendre le canvas responsive */
+    body {
+      font-family: sans-serif;
+      text-align: center;
+      margin: 0;
+      padding: 0;
+    }
+    #simCanvas {
+      border: 1px solid #000;
+      touch-action: none; /* Désactive les gestes par défaut sur mobile */
+      display: block;
+      margin: auto;
+    }
+    #controls {
+      margin: 10px;
+    }
+    .control-item {
+      margin: 5px;
+    }
+  </style>
+</head>
+<body>
+  <h1>Simulation de Gravitation</h1>
+
+  <!-- Canvas de la simulation -->
+  <canvas id="simCanvas"></canvas>
+
+  <!-- Contrôles pour la simulation -->
+  <div id="controls">
+    <!-- Bouton pour basculer entre mode statique et dynamique -->
+    <button id="toggleMode" class="control-item">Passer en mode dynamique</button>
+    <!-- Bouton pour réinitialiser l'objet sur la surface de la planète -->
+    <button id="resetPos" class="control-item">Réinitialiser l'objet</button>
+    <!-- Bouton pour basculer entre les modes de collision -->
+    <button id="toggleCollision" class="control-item">mode réaliste</button>
+    <!-- Menu déroulant pour choisir la planète -->
+    <label class="control-item">
+      Planète :
+      <select id="planetSelect">
+        <option value="Mercure">Mercure</option>
+        <option value="Venus">Venus</option>
+        <option value="Terre" selected>Terre</option>
+        <option value="Mars">Mars</option>
+        <option value="Jupiter">Jupiter</option>
+        <option value="Saturne">Saturne</option>
+        <option value="Uranus">Uranus</option>
+        <option value="Neptune">Neptune</option>
+      </select>
+    </label>
+    <!-- Input pour modifier la masse de l'objet -->
+    <label class="control-item">
+      Masse de l'objet (kg) :
+      <input type="number" id="objectMass" value="1" step="0.1" min="0.1">
+    </label>
+  </div>
+
+  <!-- Affichage de la valeur du poids -->
+  <div id="display">
+    <p>Poids : <span id="weightDisplay">0</span> N</p>
+  </div>
+
+  <script>
+    /******** Déclarations et constantes ********/
+
+    // Propriétés des planètes : pour chaque planète, définissons une accélération gravitationnelle (g)
+    // et un rayon d'affichage (en pixels) pour la planète.
+    const planets = {
+      "Mercure": { g: 3.7, displayRadius: 80 },
+      "Venus":   { g: 8.87, displayRadius: 90 },
+      "Terre":   { g: 9.81, displayRadius: 100 },
+      "Mars":    { g: 3.71, displayRadius: 75 },
+      "Jupiter": { g: 24.79, displayRadius: 130 },
+      "Saturne": { g: 10.44, displayRadius: 120 },
+      "Uranus":  { g: 8.69, displayRadius: 110 },
+      "Neptune": { g: 11.15, displayRadius: 110 }
+    };
+
+    // Récupération du canvas et du contexte de dessin
+    const canvas = document.getElementById('simCanvas');
+    const ctx = canvas.getContext('2d');
+
+    // Retourne le centre du canvas (et de la planète)
+    function getCenter() {
+      return { x: canvas.width / 2, y: canvas.height / 2 };
+    }
+
+    /******** Variables de simulation ********/
+
+    let mode = 'static'; // mode de simulation : 'static' ou 'dynamic'
+    let collisionEnabled = false; // false = mode réaliste (objet peut traverser l'astre), true = mode irréaliste (objet ne le traverse pas)
+
+    // Variables pour gérer le glisser-déposer
+    let dragging = false;
+    let lastDragPos = { x: 0, y: 0 };
+
+    // Position initiale de l'objet (placée par défaut à droite du centre)
+    let objectPos = {
+      x: getCenter().x + planets["Terre"].displayRadius + 50,
+      y: getCenter().y
+    };
+    let objectVel = { x: 0, y: 0 }; // Vitesse de l'objet (pour le mode dynamique)
+    let animationRequest; // Référence pour l'animation
+
+    /******** Gestion des éléments du DOM ********/
+
+    const toggleButton = document.getElementById('toggleMode');
+    const resetButton = document.getElementById('resetPos');
+    const toggleCollisionButton = document.getElementById('toggleCollision');
+    const planetSelect = document.getElementById('planetSelect');
+    const objectMassInput = document.getElementById('objectMass');
+    const weightDisplay = document.getElementById('weightDisplay');
+
+    /******** Fonction pour adapter le canvas à la taille de la fenêtre (responsive) ********/
+
+    function resizeCanvas() {
+      canvas.width = window.innerWidth * 0.9;
+      canvas.height = window.innerHeight * 0.6;
+      draw();
+    }
+    window.addEventListener('resize', resizeCanvas);
+
+    /******** Fonctions utilitaires ********/
+
+    // Retourne la distance entre deux points
+    function distance(p1, p2) {
+      return Math.hypot(p1.x - p2.x, p1.y - p2.y);
+    }
+
+    // Fonction qui vérifie et ajuste la position de l'objet si collision activée
+    function applyCollisionConstraint() {
+      if (!collisionEnabled) return;
+      const center = getCenter();
+      const planet = planets[planetSelect.value];
+      let dx = objectPos.x - center.x;
+      let dy = objectPos.y - center.y;
+      let d = Math.hypot(dx, dy);
+      if (d < planet.displayRadius) {
+        // Recalage de l'objet sur le périmètre de la planète
+        let angle = Math.atan2(dy, dx);
+        objectPos.x = center.x + planet.displayRadius * Math.cos(angle);
+        objectPos.y = center.y + planet.displayRadius * Math.sin(angle);
+        objectVel = { x: 0, y: 0 };
+      }
+    }
+
+    // Calcul du vecteur gravitationnel.
+    // On utilise la formule : F = m * g * (R²)/(r²)
+    // R correspond au rayon d'affichage de la planète, r à la distance entre l'objet et le centre.
+    function computeGravity() {
+      const center = getCenter();
+      const dx = center.x - objectPos.x;
+      const dy = center.y - objectPos.y;
+      let r = Math.hypot(dx, dy);
+      const planet = planets[planetSelect.value];
+      if (r < planet.displayRadius) r = planet.displayRadius; // évite une division par zéro
+      const mass = parseFloat(objectMassInput.value);
+      const F = mass * planet.g * (planet.displayRadius * planet.displayRadius) / (r * r);
+      const angle = Math.atan2(dy, dx);
+      return { 
+        Fx: F * Math.cos(angle), 
+        Fy: F * Math.sin(angle), 
+        F: F 
+      };
+    }
+
+    /******** Dessin de la scène ********/
+
+    function draw() {
+      // Efface le canvas
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      const center = getCenter();
+      const planet = planets[planetSelect.value];
+
+      // Dessin de l'astre (planète) : cercle centré
+      ctx.beginPath();
+      ctx.arc(center.x, center.y, planet.displayRadius, 0, 2 * Math.PI);
+      ctx.fillStyle = '#87CEEB'; // bleu clair
+      ctx.fill();
+      ctx.stroke();
+
+      // Dessin du vecteur gravitationnel (flèche) depuis l'objet vers le centre
+      const gravity = computeGravity();
+      ctx.beginPath();
+      ctx.moveTo(objectPos.x, objectPos.y);
+      const vectorScale = 5; // facteur d'échelle pour rendre visible la flèche
+      ctx.lineTo(objectPos.x + gravity.Fx * vectorScale, objectPos.y + gravity.Fy * vectorScale);
+      ctx.strokeStyle = 'red';
+      ctx.lineWidth = 2;
+      ctx.stroke();
+
+      // Dessin de l'objet (carré centré sur objectPos)
+      const size = 20;
+      ctx.fillStyle = 'green';
+      ctx.fillRect(objectPos.x - size/2, objectPos.y - size/2, size, size);
+
+      // Affichage numérique du poids
+      weightDisplay.textContent = gravity.F.toFixed(2);
+
+      // Dans le mode irréaliste, on s'assure que l'objet ne pénètre pas l'astre
+      applyCollisionConstraint();
+    }
+
+    /******** Boucle d'animation pour le mode dynamique ********/
+
+    function animate() {
+      if (mode !== 'dynamic') return;
+      const dt = 0.016; // pas de temps (~60 fps)
+      const gravity = computeGravity();
+      const mass = parseFloat(objectMassInput.value);
+      const ax = gravity.Fx / mass;
+      const ay = gravity.Fy / mass;
+
+      // Intégration Euler pour mettre à jour la vitesse
+      objectVel.x += ax * dt;
+      objectVel.y += ay * dt;
+      // Mise à jour de la position (facteur d'amplification pour visualiser le mouvement)
+      objectPos.x += objectVel.x * dt * 100;
+      objectPos.y += objectVel.y * dt * 100;
+
+      // Appliquer la contrainte de collision si activée
+      if (collisionEnabled) {
+        applyCollisionConstraint();
+      }
+      draw();
+      animationRequest = requestAnimationFrame(animate);
+    }
+
+    /******** Gestion du glisser-déposer (souris et tactile) ********/
+
+    function startDrag(e) {
+      e.preventDefault();
+      dragging = true;
+      lastDragPos = getEventPos(e);
+    }
+
+    function duringDrag(e) {
+      if (!dragging) return;
+      e.preventDefault();
+      const pos = getEventPos(e);
+      objectPos.x = pos.x;
+      objectPos.y = pos.y;
+      // Si la collision est activée, on force l'objet à rester sur ou à l'extérieur de l'astre
+      if(collisionEnabled) applyCollisionConstraint();
+      lastDragPos = pos;
+      draw();
+    }
+
+    function endDrag(e) {
+      e.preventDefault();
+      dragging = false;
+      if (collisionEnabled) applyCollisionConstraint();
+    }
+
+    function getEventPos(e) {
+      const rect = canvas.getBoundingClientRect();
+      if (e.touches) {
+        return {
+          x: e.touches[0].clientX - rect.left,
+          y: e.touches[0].clientY - rect.top
+        };
+      } else {
+        return {
+          x: e.clientX - rect.left,
+          y: e.clientY - rect.top
+        };
+      }
+    }
+
+    // Événements souris et tactiles pour le drag
+    canvas.addEventListener('mousedown', startDrag);
+    canvas.addEventListener('mousemove', duringDrag);
+    canvas.addEventListener('mouseup', endDrag);
+    canvas.addEventListener('mouseleave', endDrag);
+    canvas.addEventListener('touchstart', startDrag);
+    canvas.addEventListener('touchmove', duringDrag);
+    canvas.addEventListener('touchend', endDrag);
+    canvas.addEventListener('touchcancel', endDrag);
+
+    // Lorsqu'on clique sur le canvas (en dehors d'un drag), on positionne l'objet à l'endroit cliqué
+    canvas.addEventListener('click', function(e) {
+      if (!dragging) {
+        const pos = getEventPos(e);
+        objectPos = { x: pos.x, y: pos.y };
+        objectVel = { x: 0, y: 0 };
+        if(collisionEnabled) applyCollisionConstraint();
+        draw();
+      }
+    });
+
+    /******** Boutons de contrôle ********/
+
+    // Bouton pour basculer entre mode statique et dynamique
+    toggleButton.addEventListener('click', function(){
+      if (mode === 'static') {
+        mode = 'dynamic';
+        toggleButton.textContent = "Passer en mode statique";
+        objectVel = { x: 0, y: 0 };
+        animate();
+      } else {
+        mode = 'static';
+        toggleButton.textContent = "Passer en mode dynamique";
+        if (animationRequest) cancelAnimationFrame(animationRequest);
+      }
+    });
+
+    // Bouton de réinitialisation : replace l'objet sur la surface de la planète (à 0 m d'altitude)
+    resetButton.addEventListener('click', function(){
+      const center = getCenter();
+      const planet = planets[planetSelect.value];
+      // Placement de l'objet sur le périmètre de l'astre (côté droit par défaut)
+      objectPos = {
+        x: center.x + planet.displayRadius,
+        y: center.y
+      };
+      objectVel = { x: 0, y: 0 };
+      draw();
+    });
+
+    // Bouton pour basculer entre le mode réaliste et irréaliste (collision)
+    toggleCollisionButton.addEventListener('click', function(){
+      collisionEnabled = !collisionEnabled;
+      // Mise à jour du texte du bouton selon le mode activé
+      if (collisionEnabled) {
+        toggleCollisionButton.textContent = "mode irréaliste";
+        // Si l'objet se trouve déjà à l'intérieur de l'astre, on le déplace sur la surface
+        applyCollisionConstraint();
+        draw();
+      } else {
+        toggleCollisionButton.textContent = "mode réaliste";
+      }
+    });
+
+    // Appel initial pour adapter le canvas
+    resizeCanvas();
+  </script>
+</body>
+</html>
